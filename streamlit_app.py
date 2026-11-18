@@ -125,6 +125,8 @@ with st.sidebar:
             "Select Tool",
             [
                 "➕ Merge & Sequence PDFs",
+                "✂️ Split / Extract PDF Pages",
+                "🔄 Replace / Insert PDF Pages",  # <-- NEW TOOL
                 "🔓 Unlock Protected PDF",
                 "🌗 Convert PDF to B&W",
                 "🗜️ Compress PDF",
@@ -235,6 +237,352 @@ if tool == "➕ Merge & Sequence PDFs":
                     except Exception as e:
                         st.error(f"Merge failed: {e}")
 
+# =========================================================
+# TOOL 1B: SPLIT / EXTRACT PDF PAGES
+# =========================================================
+elif tool == "✂️ Split / Extract PDF Pages":
+    render_tool_header(
+        "✂️ Split / Extract PDF Pages",
+        "Extract specific page ranges into a new PDF, or burst a document into separate files."
+    )
+
+    uploaded_file = st.file_uploader("Upload PDF to split", type=["pdf"])
+
+    if uploaded_file:
+        try:
+            file_bytes = uploaded_file.read()
+            reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+            total_pages = len(reader.pages)
+            st.info(f"📄 **{uploaded_file.name}** has **{total_pages}** page(s).")
+
+            split_mode = st.radio(
+                "Split Mode",
+                [
+                    "Extract specific pages / ranges into one PDF",
+                    "Split every page into individual PDFs (.zip)",
+                    "Split into chunks of N pages (.zip)"
+                ]
+            )
+
+            base_name = os.path.splitext(uploaded_file.name)[0]
+
+            # --- MODE 1: Specific Ranges ---
+            if split_mode.startswith("Extract"):
+                page_spec = st.text_input(
+                    "Enter pages or ranges (1-indexed, comma-separated)",
+                    value=f"1-{min(2, total_pages)}",
+                    help="Example: 1, 3, 5-8"
+                )
+
+                if st.button("Extract Selected Pages", type="primary"):
+                    try:
+                        selected_indices = []
+                        for part in page_spec.split(","):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            if "-" in part:
+                                start_s, end_s = part.split("-", 1)
+                                start_p, end_p = int(start_s), int(end_s)
+                                if start_p < 1 or end_p > total_pages or start_p > end_p:
+                                    raise ValueError(f"Invalid range '{part}'. Must be between 1 and {total_pages}.")
+                                selected_indices.extend(range(start_p - 1, end_p))
+                            else:
+                                p = int(part)
+                                if p < 1 or p > total_pages:
+                                    raise ValueError(f"Page {p} is out of bounds (1-{total_pages}).")
+                                selected_indices.append(p - 1)
+
+                        if not selected_indices:
+                            st.warning("Please enter at least one valid page number.")
+                        else:
+                            writer = PyPDF2.PdfWriter()
+                            for idx in selected_indices:
+                                writer.add_page(reader.pages[idx])
+
+                            out_buf = io.BytesIO()
+                            writer.write(out_buf)
+                            out_buf.seek(0)
+
+                            st.success(f"Extracted **{len(selected_indices)}** page(s)!")
+                            st.download_button(
+                                label="⬇️ Download Extracted PDF",
+                                data=out_buf,
+                                file_name=f"{base_name}_extracted.pdf",
+                                mime="application/pdf"
+                            )
+                    except ValueError as ve:
+                        st.error(str(ve))
+
+            # --- MODE 2: Burst All Pages ---
+            elif split_mode.startswith("Split every page"):
+                if st.button("Split All Pages", type="primary"):
+                    with st.spinner("Splitting pages..."):
+                        zip_buf = io.BytesIO()
+                        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for idx in range(total_pages):
+                                writer = PyPDF2.PdfWriter()
+                                writer.add_page(reader.pages[idx])
+                                page_buf = io.BytesIO()
+                                writer.write(page_buf)
+                                zf.writestr(f"{base_name}_page_{idx + 1}.pdf", page_buf.getvalue())
+
+                        zip_buf.seek(0)
+                        st.success(f"Split into **{total_pages}** individual PDFs!")
+                        st.download_button(
+                            label="⬇️ Download All Pages (.zip)",
+                            data=zip_buf,
+                            file_name=f"{base_name}_split_pages.zip",
+                            mime="application/zip"
+                        )
+
+            # --- MODE 3: Split Every N Pages ---
+            else:
+                chunk_size = st.number_input(
+                    "Pages per split file",
+                    min_value=1,
+                    max_value=max(1, total_pages),
+                    value=min(2, total_pages),
+                    step=1
+                )
+
+                if st.button("Split Into Chunks", type="primary"):
+                    with st.spinner("Creating PDF chunks..."):
+                        zip_buf = io.BytesIO()
+                        chunk_count = 0
+                        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for start_idx in range(0, total_pages, chunk_size):
+                                end_idx = min(start_idx + chunk_size, total_pages)
+                                writer = PyPDF2.PdfWriter()
+                                for idx in range(start_idx, end_idx):
+                                    writer.add_page(reader.pages[idx])
+                                chunk_buf = io.BytesIO()
+                                writer.write(chunk_buf)
+                                chunk_count += 1
+                                zf.writestr(
+                                    f"{base_name}_part{chunk_count}_p{start_idx + 1}-{end_idx}.pdf",
+                                    chunk_buf.getvalue()
+                                )
+
+                        zip_buf.seek(0)
+                        st.success(f"Created **{chunk_count}** PDF file(s)!")
+                        st.download_button(
+                            label="⬇️ Download Split Chunks (.zip)",
+                            data=zip_buf,
+                            file_name=f"{base_name}_chunks.zip",
+                            mime="application/zip"
+                        )
+
+        except Exception as e:
+            st.error(f"Could not read PDF: {e}")
+
+# =========================================================
+# TOOL 1C: REPLACE / INSERT PDF PAGES
+# =========================================================
+elif tool == "🔄 Replace / Insert PDF Pages":
+    render_tool_header(
+        "🔄 Replace / Insert PDF Pages",
+        "Replace a range of pages with a new PDF, insert a PDF at a specific page, or map individual pages 1-to-1."
+    )
+
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        orig_file = st.file_uploader("1. Upload Original PDF", type=["pdf"], key="rep_orig")
+    with col_up2:
+        new_file = st.file_uploader("2. Upload New / Replacement PDF", type=["pdf"], key="rep_new")
+
+    if orig_file and new_file:
+        try:
+            orig_reader = PyPDF2.PdfReader(io.BytesIO(orig_file.read()))
+            new_reader = PyPDF2.PdfReader(io.BytesIO(new_file.read()))
+
+            orig_total = len(orig_reader.pages)
+            new_total = len(new_reader.pages)
+
+            st.info(
+                f"📄 **Original PDF:** {orig_total} page(s)  |  "
+                f"📄 **New PDF:** {new_total} page(s)"
+            )
+
+            mode = st.radio(
+                "Select Operation Mode",
+                [
+                    "Replace pages starting from a page number (with entire new PDF)",
+                    "Insert entire new PDF at a specific page number",
+                    "Page-by-page replacement (map specific pages)"
+                ]
+            )
+
+            base_name = os.path.splitext(orig_file.name)[0]
+
+            # -------------------------------------------------
+            # MODE 1: Replace starting from page number
+            # -------------------------------------------------
+            if mode.startswith("Replace pages starting"):
+                start_page = st.number_input(
+                    "Start replacing at Original Page # (1-indexed)",
+                    min_value=1,
+                    max_value=orig_total,
+                    value=1,
+                    step=1
+                )
+
+                end_page = min(orig_total, start_page + new_total - 1)
+                replaced_count = end_page - start_page + 1
+
+                if start_page + new_total - 1 > orig_total:
+                    st.warning(
+                        f"Original PDF only has {orig_total} pages. Pages **{start_page} to {orig_total}** "
+                        f"({replaced_count} page(s)) will be replaced, and all **{new_total}** pages of the new PDF will be placed there."
+                    )
+                else:
+                    st.caption(
+                        f"Pages **{start_page} to {end_page}** of the original PDF will be replaced with all **{new_total}** page(s) of the new PDF."
+                    )
+
+                if st.button("Replace Pages Now", type="primary"):
+                    writer = PyPDF2.PdfWriter()
+
+                    # Pages before start_page
+                    for i in range(0, start_page - 1):
+                        writer.add_page(orig_reader.pages[i])
+
+                    # Entire new PDF
+                    for page in new_reader.pages:
+                        writer.add_page(page)
+
+                    # Remaining pages after the replaced block
+                    for i in range(end_page, orig_total):
+                        writer.add_page(orig_reader.pages[i])
+
+                    out_buf = io.BytesIO()
+                    writer.write(out_buf)
+                    out_buf.seek(0)
+
+                    st.success(f"Replaced pages {start_page}–{end_page} with {new_total} new page(s)!")
+                    st.download_button(
+                        label="⬇️ Download Updated PDF",
+                        data=out_buf,
+                        file_name=f"{base_name}_replaced.pdf",
+                        mime="application/pdf"
+                    )
+
+            # -------------------------------------------------
+            # MODE 2: Insert entire new PDF at page number
+            # -------------------------------------------------
+            elif mode.startswith("Insert entire new PDF"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    position = st.selectbox("Insert Position", ["Before page", "After page"])
+                with c2:
+                    target_page = st.number_input(
+                        "Target Original Page # (1-indexed)",
+                        min_value=1,
+                        max_value=orig_total,
+                        value=1,
+                        step=1
+                    )
+
+                insert_idx = (target_page - 1) if position == "Before page" else target_page
+
+                st.caption(
+                    f"All **{new_total}** page(s) of the new PDF will be inserted **{position.lower()} {target_page}** "
+                    f"(final document will have **{orig_total + new_total}** pages)."
+                )
+
+                if st.button("Insert Pages Now", type="primary"):
+                    writer = PyPDF2.PdfWriter()
+
+                    for i in range(0, insert_idx):
+                        writer.add_page(orig_reader.pages[i])
+
+                    for page in new_reader.pages:
+                        writer.add_page(page)
+
+                    for i in range(insert_idx, orig_total):
+                        writer.add_page(orig_reader.pages[i])
+
+                    out_buf = io.BytesIO()
+                    writer.write(out_buf)
+                    out_buf.seek(0)
+
+                    st.success(f"Inserted {new_total} page(s) {position.lower()} page {target_page}!")
+                    st.download_button(
+                        label="⬇️ Download Updated PDF",
+                        data=out_buf,
+                        file_name=f"{base_name}_inserted.pdf",
+                        mime="application/pdf"
+                    )
+
+            # -------------------------------------------------
+            # MODE 3: Page-by-page replacement mapping
+            # -------------------------------------------------
+            else:
+                num_mappings = st.number_input(
+                    "How many pages do you want to replace?",
+                    min_value=1,
+                    max_value=orig_total,
+                    value=1,
+                    step=1
+                )
+
+                st.caption("Specify which Original Page should be replaced by which New PDF Page:")
+
+                mapping = {}
+                duplicate_targets = False
+
+                for m in range(int(num_mappings)):
+                    mc1, mc2, mc3 = st.columns([2, 1, 2])
+                    with mc1:
+                        orig_p = st.number_input(
+                            f"Original Page # (Row {m+1})",
+                            min_value=1,
+                            max_value=orig_total,
+                            value=min(m + 1, orig_total),
+                            key=f"map_orig_{m}"
+                        )
+                    with mc2:
+                        st.markdown("<div style='padding-top: 2rem; text-align: center;'>➡️</div>", unsafe_allow_html=True)
+                    with mc3:
+                        new_p = st.number_input(
+                            f"Replacement Page # (Row {m+1})",
+                            min_value=1,
+                            max_value=new_total,
+                            value=min(m + 1, new_total),
+                            key=f"map_new_{m}"
+                        )
+
+                    if orig_p in mapping:
+                        duplicate_targets = True
+                    mapping[orig_p] = new_p
+
+                if duplicate_targets:
+                    st.warning("Duplicate Original Page numbers detected—later rows will override earlier rows for the same page.")
+
+                if st.button("Apply Page-by-Page Replacement", type="primary"):
+                    writer = PyPDF2.PdfWriter()
+
+                    for page_num in range(1, orig_total + 1):
+                        if page_num in mapping:
+                            replacement_idx = mapping[page_num] - 1
+                            writer.add_page(new_reader.pages[replacement_idx])
+                        else:
+                            writer.add_page(orig_reader.pages[page_num - 1])
+
+                    out_buf = io.BytesIO()
+                    writer.write(out_buf)
+                    out_buf.seek(0)
+
+                    st.success(f"Successfully replaced **{len(mapping)}** page(s)!")
+                    st.download_button(
+                        label="⬇️ Download Updated PDF",
+                        data=out_buf,
+                        file_name=f"{base_name}_custom_replaced.pdf",
+                        mime="application/pdf"
+                    )
+
+        except Exception as e:
+            st.error(f"Error processing PDFs: {e}")
 
 # =========================================================
 # TOOL 2: UNLOCK PROTECTED PDF
